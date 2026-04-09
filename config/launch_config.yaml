@@ -1,0 +1,31 @@
+launches:
+  MavRos:
+    nodes: ["/mavros"]
+    launch_cmd: "roslaunch mavros px4.launch"
+  Lidar_Driver:
+    Lidar_Driver: ["livox_lidar_publisher2"]
+    launch_cmd: "roslaunch livox_ros_driver2 msg_MID360.launch"
+  Camera_Diver:
+    nodes: ["/usb_cam"]
+    launch_cmd: "roslaunch usb_cam usb_cam-test.launch"
+  LIO:
+    nodes: ["/laserMapping", "slam_to_uav_transform"]
+    launch_cmd: "roslaunch lsdc_slam mapping_livox.launch"
+  Planner:
+    nodes: ["/ego_planner_node", "traj_server", "waypoint_generator"]
+    launch_cmd: "roslaunch ego_planner simple_run.launch"
+  Ctrl:
+    nodes: ["/egoctrl_v2_node"]
+    launch_cmd: "source ~/control_ws/devel/setup.bash; roslaunch offboard_ctrl offboard_v2.launch;"
+
+
+
+# launch_to_nodes_map = {
+#     'MavRos': ['/mavros'],
+#     'Lidar_Driver': ['node7'],
+#     'Camera_Diver': ['node8'],
+#     'LIO': ['/laserMapping'],
+#     'Planner': ['node6'],
+#     'Ctrl': ['node9'],
+#     # 根据需要继续添加其他launch文件和对应的节点
+# }

@@ -1,0 +1,4 @@
+<launch>
+    <param name="config_path" value="config/launch_config.yaml"/>
+    <node name="node_manager" pkg="astro_manager" type="node_manager.py" output="screen"/>
+</launch>
