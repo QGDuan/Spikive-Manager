@@ -1,4 +1,16 @@
 <launch>
-    <param name="config_path" value="config/launch_config.yaml"/>
-    <node name="node_manager" pkg="astro_manager" type="node_manager.py" output="screen"/>
+  <!-- Required: which drone this manager belongs to. Must match the
+       droneId entered in the Lichtblick frontend (RobotEntry.droneId). -->
+  <arg name="drone_id" value="2"/>
+  <arg name="log_root" default="$(env HOME)/spikive_logs" />
+  <arg name="config"   default="$(find astro_manager)/config/launch_config.yaml" />
+
+  <node name="node_manager_$(arg drone_id)"
+        pkg="astro_manager" type="node_manager.py"
+        output="log"
+        required="true">
+    <param name="drone_id"    value="$(arg drone_id)" />
+    <param name="config_path" value="$(arg config)" />
+    <param name="log_root"    value="$(arg log_root)" />
+  </node>
 </launch>

@@ -2,23 +2,28 @@
 # 自动化系统的总体状态和控制消息
 
 Header header          # 标准的ROS消息头部，包含时间戳和帧ID
-string mode            # 自动化模式的名称（例如："exploration", "return_home"）
-bool is_active         # 自动化功能是否正在运行
+string mode            # 自动化模式名称（"idle" / "starting" / "ready" / "stopping" / "error"）
+bool is_active         # 后端权威：六个 launch 全就绪后置 true
+bool starting          # 后端权威：start_all/restart_all 进行中
+bool armed             # 镜像 /drone_{id}_mavros/state.armed
+string last_error      # 最近一次拒绝/失败原因（前端 toast 直接读这个）
+uint32 last_error_seq  # 单调递增；前端用它判断"是不是新错误"，避免重复 toast
 
 uint8 odometry_status  # 里程计状态
-                      # 0: UNKNOWN - 未知状态
-                      # 1: OK - 状态正常
-                      # 2: ERROR - 状态错误
+                       # 0: UNKNOWN - 未知状态
+                       # 1: OK - 状态正常
+                       # 2: ERROR - 状态错误
 
 # 监控各模块中的节点执行情况
-uint8 mavros_status    # 0: 未执行, 1: 不完整, 2: 完整
-uint8 cam_driver_status # 0: 未执行, 1: 不完整, 2: 完整
-uint8 lidar_driver_status # 0: 未执行, 1: 不完整, 2: 完整
-uint8 slam_status      # 0: 未执行, 1: 不完整, 2: 完整
-uint8 planner_status   # 0: 未执行, 1: 不完整, 2: 完整
-uint8 ctrl_status      # 0: 未执行, 1: 不完整, 2: 完整
+# 0: 未执行, 1: 不完整（部分节点在跑）, 2: 完整（所有节点都在跑）
+uint8 mavros_status
+uint8 cam_driver_status
+uint8 lidar_driver_status
+uint8 slam_status
+uint8 planner_status
+uint8 ctrl_status
 
 uint8 restart_status   # 系统重启状态
-                      # 0: 无, 1: 重启中
+                       # 0: 无, 1: 重启中
 
-Command command        # 命令消息，用于控制ROS节点的操作
+Command command        # 命令消息，最近一次接收到的命令
