@@ -27,7 +27,7 @@ roslaunch astro_manager AstroManager.launch drone_id:=1
 ```
 Header header
 string command_type       # "start_all" | "shutdown_all"
-string[] target_launches  # 仅 start_node/shutdown_node 使用
+string[] target_launches  # 保留字段，当前 start_all/shutdown_all 忽略
 float64[] parameters
 string extra_data
 ```
@@ -44,9 +44,11 @@ string extra_data
 
 ```
 Header header
+string drone_id           # 必须与 /drone_{id}_auto_manager_status 一致
 string mode               # "idle" / "starting" / "ready" / "stopping" / "error"
 bool is_active            # 全部 launch 就绪 → true
 bool starting             # start_all 执行中
+bool stopping             # shutdown_all 执行中
 bool armed                # 镜像 mavros/state.armed
 string last_error         # 最近拒绝/失败原因
 uint32 last_error_seq     # 单调递增（前端用于判断新错误）
@@ -59,15 +61,17 @@ uint8 planner_status
 uint8 ctrl_status
 
 uint8 odometry_status
-uint8 restart_status
 Command command
 ```
 
 **前端按钮逻辑**:
-- `is_active=false` 且 `starting=false` → 显示 **Start**
-- `is_active=true` 且 `starting=false` → 显示 **Stop**
-- `starting=true` → 按钮禁用 (spinner)
+- 添加卡片时先连接 Foxglove，再等待 `/drone_{id}_auto_manager_status`，只有消息 `drone_id` 与手动输入 id 一致才创建卡片
+- `is_active=false` 且 `starting=false` 且 `stopping=false` → 显示 **Start**
+- `is_active=true` 且 `starting=false` 且 `stopping=false` → 显示 **Stop**
+- `starting=true` 或 `mode="starting"` → 按钮禁用 (spinner)
+- `stopping=true` 或 `mode="stopping"` → 按钮禁用 (spinner)
 - `armed=true` → 按钮红色禁用（飞行中不可操作）
+- 状态灯只显示 Drivers: MavROS/Lidar，Tasks: SLAM/Planner
 - status 超过 4s 无更新 → 显示 Manager 离线
 
 ## 飞行联锁

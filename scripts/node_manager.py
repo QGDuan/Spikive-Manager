@@ -8,11 +8,10 @@ Per-drone supervisor for the Spikive ROS1 stack.
 
 Responsibilities
 ================
-- Start, stop, restart six logical "launches": MavRos, Lidar_Driver,
-  Camera_Diver, LIO, Planner, Ctrl.
+- Start and stop logical "launches" such as MavRos, Lidar_Driver, LIO, and Planner.
 - Publish a 1 Hz AutoManager status that the Lichtblick frontend uses to
-  drive the Robot card's Start / Restart button.
-- Refuse start/restart/shutdown while the drone is armed (mavros/state.armed).
+  drive the Robot card's Start / Stop button.
+- Refuse start/shutdown while the drone is armed (mavros/state.armed).
 - Keep its own log stream isolated from rosout so SLAM/Planner spam does
   not drown out manager events.
 - Manage child processes via Popen + setsid, allowing reliable group kill.
@@ -367,14 +366,29 @@ class NodeManager:
     # ------------------------------------------------------------------ ROS callbacks
 
     def _on_command(self, msg: Command) -> None:
+        # Admission is intentionally done in the ROS callback before queueing:
+        # stale lifecycle commands must not wait behind a long startup and then
+        # execute against a different backend state.
+        reject_reason = self._command_reject_reason(msg)
+        if reject_reason is not None:
+            with self._lock:
+                self._last_command = msg
+            self._set_error(reject_reason, (msg.command_type or "").strip())
+            return
+
         # Stay non-blocking: the worker thread does the real work.
         try:
+            with self._lock:
+                self._last_command = msg
             self.cmd_queue.put_nowait(msg)
+            self._publish_status_immediate()
             self.log.info(
-                "Queued command: type=%s targets=%s qsize=%d",
-                msg.command_type, list(msg.target_launches), self.cmd_queue.qsize(),
+                "Queued command: type=%s targets=%s qsize=%d request=%s",
+                msg.command_type, list(msg.target_launches), self.cmd_queue.qsize(), msg.extra_data,
             )
         except queue.Full:
+            with self._lock:
+                self._last_command = msg
             self._set_error("Command queue full, dropping command", msg.command_type)
 
     def _on_armed(self, msg) -> None:  # MavrosState (or None at type-check time)
@@ -397,49 +411,44 @@ class NodeManager:
                 self.log.exception("Command handler crashed: %s", e)
                 self._set_error(f"Internal error: {e!r}", msg.command_type)
             finally:
-                self._last_command = msg
+                with self._lock:
+                    self._last_command = msg
+
+    def _command_reject_reason(self, msg: Command) -> Optional[str]:
+        ctype = (msg.command_type or "").strip()
+        if ctype not in ("start_all", "shutdown_all"):
+            return f"Unknown command_type: {ctype!r}"
+
+        with self._lock:
+            armed = self.armed
+            starting = self.starting
+            stopping = self.stopping
+            is_active = self.is_active
+            mode = self.mode
+
+        if armed:
+            return f"REJECTED: drone armed, aborting {ctype}"
+        if starting or stopping:
+            return f"REJECTED: cannot {ctype} while mode={mode}"
+        if ctype == "start_all" and is_active:
+            return "REJECTED: already running; send shutdown_all first"
+        if ctype == "shutdown_all" and not is_active:
+            return "REJECTED: nothing to stop; not active"
+        return None
 
     def _handle_command(self, msg: Command) -> None:
         ctype = (msg.command_type or "").strip()
 
-        # Hard interlock: any lifecycle change while armed is rejected.
-        if ctype in ("start_all", "shutdown_all",
-                     "start_node", "restart_node", "shutdown_node"):
-            if self.armed:
-                self._set_error(f"REJECTED: drone armed, aborting {ctype}", ctype)
-                return
+        # Keep a second guard here because state may change after admission.
+        reject_reason = self._command_reject_reason(msg)
+        if reject_reason is not None:
+            self._set_error(reject_reason, ctype)
+            return
 
         if ctype == "start_all":
-            # Reject double-start: only allowed from IDLE / ERROR.
-            if self.starting or self.stopping:
-                self._set_error(
-                    f"REJECTED: cannot start_all while mode={self.mode}", ctype,
-                )
-                return
-            if self.is_active:
-                self._set_error(
-                    "REJECTED: already running; send shutdown_all first", ctype,
-                )
-                return
             self._start_all()
         elif ctype == "shutdown_all":
-            if self.starting or self.stopping:
-                self._set_error(
-                    f"REJECTED: cannot shutdown_all while mode={self.mode}", ctype,
-                )
-                return
-            if not self.is_active:
-                self._set_error(
-                    "REJECTED: nothing to stop; not active", ctype,
-                )
-                return
             self._shutdown_all()
-        elif ctype == "start_node":
-            self._start_named(list(msg.target_launches), restart=False)
-        elif ctype == "restart_node":
-            self._start_named(list(msg.target_launches), restart=True)
-        elif ctype == "shutdown_node":
-            self._shutdown_named(list(msg.target_launches))
         else:
             self._set_error(f"Unknown command_type: {ctype!r}", ctype)
 
@@ -472,8 +481,7 @@ class NodeManager:
         self._publish_status_immediate()
 
     def _stop_all_processes(self) -> None:
-        """Stop every launch in reverse topological order. Used by both
-        restart_all (as phase 1) and shutdown_all."""
+        """Stop every launch in reverse topological order."""
         for name in reversed(self.launch_order):
             self.processes[name].stop()
 
@@ -490,26 +498,6 @@ class NodeManager:
             self.mode = MODE_IDLE
         self._publish_status_immediate()
         self.log.info("shutdown_all complete")
-
-    def _start_named(self, names: List[str], restart: bool) -> None:
-        for n in names:
-            if n not in self.processes:
-                self._set_error(f"Unknown launch '{n}'", "start_node")
-                continue
-            if restart:
-                self.processes[n].stop()
-            self._start_launch(n)
-
-    def _shutdown_named(self, names: List[str]) -> None:
-        for n in names:
-            if n not in self.processes:
-                self._set_error(f"Unknown launch '{n}'", "shutdown_node")
-                continue
-            self.processes[n].stop()
-        with self._lock:
-            if not any(self.processes[n].is_alive() for n in self.processes):
-                self.is_active = False
-                self.mode = MODE_IDLE
 
     def _start_launch(self, name: str) -> bool:
         cfg = self.launches[name]
@@ -615,14 +603,17 @@ class NodeManager:
         m = AutoManager()
         m.header.stamp = rospy.Time.now()
         m.header.frame_id = f"drone_{self.drone_id}"
+        if hasattr(m, "drone_id"):
+            m.drone_id = self.drone_id
         with self._lock:
             m.mode = self.mode
             m.is_active = self.is_active
             m.starting = self.starting
+            if hasattr(m, "stopping"):
+                m.stopping = self.stopping
             m.armed = self.armed
             m.last_error = self.last_error
             m.last_error_seq = self.last_error_seq
-            m.restart_status = 1 if self.starting else 0
         m.odometry_status = 0  # not tracked yet
         m.mavros_status = self._check_subsystem("MavRos") if "MavRos" in self.launches else 0
         m.cam_driver_status = (
@@ -655,7 +646,8 @@ class NodeManager:
         with self._lock:
             self.last_error_seq += 1
             self.last_error = message
-            self.mode = MODE_ERROR if self.starting is False else self.mode
+            if not self.starting and not self.stopping:
+                self.mode = MODE_ERROR
         self.log.error("[%s] %s (seq=%d)", context, message, self.last_error_seq)
         self._publish_status_immediate()
 
