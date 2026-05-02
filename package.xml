@@ -17,7 +17,7 @@
   <exec_depend>rospy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>message_runtime</exec_depend>
-  <!-- runtime-only: subscribed to read /drone_{id}_mavros/state.armed -->
+  <!-- runtime-only: subscribed to read /mavros/state.armed -->
   <exec_depend>mavros_msgs</exec_depend>
 
   <export>

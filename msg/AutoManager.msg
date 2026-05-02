@@ -7,7 +7,7 @@ string mode            # 自动化模式名称（"idle" / "starting" / "ready" /
 bool is_active         # 后端权威：所有 launch 全就绪后置 true
 bool starting          # 后端权威：start_all 进行中
 bool stopping          # 后端权威：shutdown_all 进行中
-bool armed             # 镜像 /drone_{id}_mavros/state.armed
+bool armed             # 镜像机载 /mavros/state.armed
 string last_error      # 最近一次拒绝/失败原因（前端 toast 直接读这个）
 uint32 last_error_seq  # 单调递增；前端用它判断"是不是新错误"，避免重复 toast
 

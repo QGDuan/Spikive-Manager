@@ -17,7 +17,7 @@ roslaunch astro_manager AstroManager.launch drone_id:=1
 
 ## Topic 协议
 
-所有 topic 带 `/drone_{id}_` 前缀，与前端 `/drone_{id}_*` 命名约定一致。
+前端命令和状态 topic 带 `/drone_{id}_` 前缀，与前端 `/drone_{id}_*` 命名约定一致。机载 MAVROS 状态使用无人机内部 topic `/mavros/state`，不带 `drone_id`。
 
 ### 命令（前端 → 后端）
 
@@ -49,7 +49,7 @@ string mode               # "idle" / "starting" / "ready" / "stopping" / "error"
 bool is_active            # 全部 launch 就绪 → true
 bool starting             # start_all 执行中
 bool stopping             # shutdown_all 执行中
-bool armed                # 镜像 mavros/state.armed
+bool armed                # 镜像 /mavros/state.armed
 string last_error         # 最近拒绝/失败原因
 uint32 last_error_seq     # 单调递增（前端用于判断新错误）
 
@@ -76,7 +76,12 @@ Command command
 
 ## 飞行联锁
 
-后端订阅 `/drone_{id}_mavros/state`，armed=true 时**拒绝**所有 start/shutdown 命令。前端按钮也做镜像禁用（双保险），但权威判断在后端。
+后端强制订阅机载 `/mavros/state`，缓存 `connected/armed/guided/manual_input/mode/system_status/header.stamp` 和本机接收时间用于日志。这个 topic 不是可配置项；Stop 空中联锁必须始终打开。前端不直接订阅 `/mavros/state`，也不直接用 `AutoManager.armed` 禁用 Start/Stop；点击后由后端用最新 MAVROS 缓存做权威校验。
+
+MAVROS 状态日志在首次收到、关键字段变化、`start_all` 完成、命令被 armed 联锁拒绝时打印。`header.stamp` 每帧都会变化，不作为“变化触发日志”的字段，避免按 `/mavros/state` 频率刷屏。`start_all` 全部 ready 后，日志会明确输出当前 Stop 是否允许：
+
+- `shutdown_all`：必须有 3 秒内新鲜 `/mavros/state` 且 `armed=false` 才执行；missing/stale/armed 都拒绝并写日志
+- `start_all`：如果有 3 秒内新鲜 `/mavros/state` 且 `armed=true` 则拒绝；如果 MAVROS 状态 missing/stale，允许启动并写日志说明跳过 armed 预检
 
 ## 日志目录
 
@@ -118,5 +123,5 @@ rostopic pub /drone_1_command_topic astro_manager/Command \
 rostopic echo /drone_1_auto_manager_status -n 1
 
 # 模拟 armed（测试联锁）
-rostopic pub -r 5 /drone_1_mavros/state mavros_msgs/State '{armed: true}'
+rostopic pub -r 5 /mavros/state mavros_msgs/State '{armed: true}'
 ```

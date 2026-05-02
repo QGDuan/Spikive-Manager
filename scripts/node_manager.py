@@ -11,16 +11,16 @@ Responsibilities
 - Start and stop logical "launches" such as MavRos, Lidar_Driver, LIO, and Planner.
 - Publish a 1 Hz AutoManager status that the Lichtblick frontend uses to
   drive the Robot card's Start / Stop button.
-- Refuse start/shutdown while the drone is armed (mavros/state.armed).
+- Refuse start/shutdown while the drone is armed (/mavros/state.armed).
 - Keep its own log stream isolated from rosout so SLAM/Planner spam does
   not drown out manager events.
 - Manage child processes via Popen + setsid, allowing reliable group kill.
 
-Topics (all prefixed with /drone_{drone_id}_)
-=============================================
+Topics
+======
 - /drone_{id}_command_topic         (sub)  astro_manager/Command
 - /drone_{id}_auto_manager_status   (pub)  astro_manager/AutoManager
-- /drone_{id}_mavros/state          (sub)  mavros_msgs/State
+- /mavros/state                     (sub)  mavros_msgs/State
 
 Logs (per-drone)
 ================
@@ -64,6 +64,8 @@ ROSNODE_LIST_INTERVAL = 1.0          # seconds between rosnode list polls during
 HEALTH_POLL_INTERVAL = 2.0           # background health update period
 GRACE_SHUTDOWN_SEC = 5.0             # SIGINT -> SIGKILL grace period for child groups
 INTER_LAUNCH_DELAY_SEC = 0.5         # small breathing room between sequential launches
+MAVROS_STATE_TOPIC = "/mavros/state"  # mandatory aircraft-internal safety interlock source
+MAVROS_STATE_MAX_AGE_SEC = 3.0       # command-time armed check freshness window
 
 # Status integers for AutoManager subsystem fields.
 ST_NOT_RUNNING = 0
@@ -234,11 +236,13 @@ class NodeManager:
         # Topic names follow the existing /drone_{id}_<base> convention.
         self.cmd_topic = f"/drone_{self.drone_id}_command_topic"
         self.status_topic = f"/drone_{self.drone_id}_auto_manager_status"
-        self.armed_topic = f"/drone_{self.drone_id}_mavros/state"
+        # MAVROS state is internal to this aircraft computer and is not
+        # drone-id namespaced. The frontend consumes only AutoManager.armed.
+        self.mavros_state_topic = MAVROS_STATE_TOPIC
 
         self.log.info(
-            "astro_manager booting drone_id=%s cmd=%s status=%s armed=%s",
-            self.drone_id, self.cmd_topic, self.status_topic, self.armed_topic,
+            "astro_manager booting drone_id=%s cmd=%s status=%s mavros_state=%s",
+            self.drone_id, self.cmd_topic, self.status_topic, self.mavros_state_topic,
         )
 
         # ---- config ---------------------------------------------------------
@@ -271,6 +275,15 @@ class NodeManager:
         self.starting: bool = False
         self.stopping: bool = False
         self.armed: bool = False
+        self.mavros_connected: bool = False
+        self.mavros_guided: bool = False
+        self.mavros_manual_input: bool = False
+        self.mavros_mode: str = ""
+        self.mavros_system_status: int = 0
+        self.mavros_state_stamp: str = ""
+        self.mavros_state_rx_time: Optional[float] = None
+        self._mavros_state_seen: bool = False
+        self._last_mavros_log_snapshot = None
         self.last_error: str = ""
         self.last_error_seq: int = 0
 
@@ -288,14 +301,15 @@ class NodeManager:
         self._status_pub = rospy.Publisher(self.status_topic, AutoManager, queue_size=10)
 
         if _MAVROS_AVAILABLE:
-            self._armed_sub = rospy.Subscriber(
-                self.armed_topic, MavrosState, self._on_armed, queue_size=4,
+            self._mavros_state_sub = rospy.Subscriber(
+                self.mavros_state_topic, MavrosState, self._on_mavros_state, queue_size=4,
             )
         else:
-            self.log.warning(
-                "mavros_msgs not importable; armed-interlock disabled (assuming armed=False)"
+            self.log.critical(
+                "mavros_msgs not importable; mandatory %s armed interlock unavailable",
+                self.mavros_state_topic,
             )
-            self._armed_sub = None
+            raise SystemExit(4)
 
         # ---- threads --------------------------------------------------------
         self._stop_evt = threading.Event()
@@ -391,11 +405,49 @@ class NodeManager:
                 self._last_command = msg
             self._set_error("Command queue full, dropping command", msg.command_type)
 
-    def _on_armed(self, msg) -> None:  # MavrosState (or None at type-check time)
-        new_armed = bool(getattr(msg, "armed", False))
-        if new_armed != self.armed:
-            self.log.warning("armed state changed: %s -> %s", self.armed, new_armed)
-        self.armed = new_armed
+    def _on_mavros_state(self, msg) -> None:  # MavrosState (or None at type-check time)
+        stamp = getattr(getattr(msg, "header", None), "stamp", None)
+        stamp_text = "unset"
+        if stamp is not None:
+            stamp_text = f"{getattr(stamp, 'secs', 0)}.{getattr(stamp, 'nsecs', 0):09d}"
+
+        snapshot = (
+            bool(getattr(msg, "connected", False)),
+            bool(getattr(msg, "armed", False)),
+            bool(getattr(msg, "guided", False)),
+            bool(getattr(msg, "manual_input", False)),
+            str(getattr(msg, "mode", "")),
+            int(getattr(msg, "system_status", 0)),
+            stamp_text,
+        )
+        log_snapshot = snapshot[:-1]
+
+        should_log = False
+        armed_changed = False
+        first_state = False
+        with self._lock:
+            first_state = not self._mavros_state_seen
+            armed_changed = snapshot[1] != self.armed
+            self.mavros_connected = snapshot[0]
+            self.armed = snapshot[1]
+            self.mavros_guided = snapshot[2]
+            self.mavros_manual_input = snapshot[3]
+            self.mavros_mode = snapshot[4]
+            self.mavros_system_status = snapshot[5]
+            self.mavros_state_stamp = snapshot[6]
+            self.mavros_state_rx_time = time.time()
+            if not self._mavros_state_seen or log_snapshot != self._last_mavros_log_snapshot:
+                should_log = True
+            self._mavros_state_seen = True
+            self._last_mavros_log_snapshot = log_snapshot
+
+        if armed_changed:
+            self.log.warning("MAVROS armed state changed: %s", self._format_mavros_state())
+            self._publish_status_immediate()
+        elif should_log:
+            self.log.info("MAVROS state: %s", self._format_mavros_state())
+            if first_state:
+                self._publish_status_immediate()
 
     # ------------------------------------------------------------------ worker
 
@@ -424,16 +476,34 @@ class NodeManager:
             starting = self.starting
             stopping = self.stopping
             is_active = self.is_active
+            mavros_state_seen = self._mavros_state_seen
+            mavros_state_age = (
+                None
+                if self.mavros_state_rx_time is None
+                else time.time() - self.mavros_state_rx_time
+            )
             mode = self.mode
 
-        if armed:
-            return f"REJECTED: drone armed, aborting {ctype}"
+        mavros_state_fresh = (
+            mavros_state_seen
+            and mavros_state_age is not None
+            and mavros_state_age <= MAVROS_STATE_MAX_AGE_SEC
+        )
+
         if starting or stopping:
             return f"REJECTED: cannot {ctype} while mode={mode}"
         if ctype == "start_all" and is_active:
             return "REJECTED: already running; send shutdown_all first"
         if ctype == "shutdown_all" and not is_active:
             return "REJECTED: nothing to stop; not active"
+
+        if mavros_state_fresh and armed:
+            return f"REJECTED: drone armed, aborting {ctype}; {self._format_mavros_state()}"
+        if ctype == "shutdown_all" and not mavros_state_fresh:
+            return (
+                "REJECTED: MAVROS state missing or stale, aborting shutdown_all; "
+                f"{self._format_mavros_state()}"
+            )
         return None
 
     def _handle_command(self, msg: Command) -> None:
@@ -461,6 +531,11 @@ class NodeManager:
             self.mode = MODE_STARTING
         self._publish_status_immediate()
         self.log.info("Begin start_all")
+        if not self._is_mavros_state_fresh():
+            self.log.warning(
+                "start_all armed precheck skipped because MAVROS state is missing or stale; %s",
+                self._format_mavros_state(),
+            )
 
         ok = True
         for name in self.launch_order:
@@ -479,6 +554,8 @@ class NodeManager:
                 self.mode = MODE_ERROR
                 self.log.error("Start sequence aborted: %s", self.last_error or "unknown")
         self._publish_status_immediate()
+        if ok:
+            self._log_stop_interlock_after_start()
 
     def _stop_all_processes(self) -> None:
         """Stop every launch in reverse topological order."""
@@ -650,6 +727,51 @@ class NodeManager:
                 self.mode = MODE_ERROR
         self.log.error("[%s] %s (seq=%d)", context, message, self.last_error_seq)
         self._publish_status_immediate()
+
+    def _format_mavros_state(self) -> str:
+        with self._lock:
+            if not self._mavros_state_seen:
+                return (
+                    f"mavros topic={self.mavros_state_topic} state=not_received "
+                    "armed=unknown"
+                )
+            age_text = "unknown"
+            if self.mavros_state_rx_time is not None:
+                age_text = f"{max(0.0, time.time() - self.mavros_state_rx_time):.2f}s"
+            return (
+                f"mavros topic={self.mavros_state_topic} "
+                f"connected={self.mavros_connected} armed={self.armed} "
+                f"guided={self.mavros_guided} manual_input={self.mavros_manual_input} "
+                f"mode={self.mavros_mode!r} system_status={self.mavros_system_status} "
+                f"stamp={self.mavros_state_stamp} rx_age={age_text}"
+            )
+
+    def _is_mavros_state_fresh(self) -> bool:
+        with self._lock:
+            if not self._mavros_state_seen or self.mavros_state_rx_time is None:
+                return False
+            return time.time() - self.mavros_state_rx_time <= MAVROS_STATE_MAX_AGE_SEC
+
+    def _log_stop_interlock_after_start(self) -> None:
+        state_text = self._format_mavros_state()
+        with self._lock:
+            armed = self.armed
+            mavros_state_seen = self._mavros_state_seen
+        if not mavros_state_seen:
+            self.log.warning(
+                "All launches ready; backend Stop disabled until MAVROS state is received; %s",
+                state_text,
+            )
+        elif armed:
+            self.log.warning(
+                "All launches ready; backend Stop disabled because aircraft is armed/flying; %s",
+                state_text,
+            )
+        else:
+            self.log.info(
+                "All launches ready; backend Stop allowed because aircraft is not armed; %s",
+                state_text,
+            )
 
     def _shutdown_hook(self) -> None:
         self.log.info("ROS shutdown received; tearing down children")
