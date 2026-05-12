@@ -350,6 +350,7 @@ class NodeManager:
             cfg.setdefault("group", "misc")
             cfg.setdefault("depends_on", [])
             cfg.setdefault("start_timeout", 8.0)
+            cfg.setdefault("ready_delay", 0.0)
         self.log.info("Loaded %d launches from %s", len(launches), path)
         return launches
 
@@ -579,6 +580,7 @@ class NodeManager:
     def _start_launch(self, name: str) -> bool:
         cfg = self.launches[name]
         timeout = float(cfg.get("start_timeout", 8.0))
+        ready_delay = float(cfg.get("ready_delay", 0.0))
         nodes: List[str] = list(cfg.get("nodes", []))
 
         try:
@@ -590,9 +592,18 @@ class NodeManager:
         if not nodes:
             # No node-readiness criteria; trust the Popen and move on.
             self.log.warning("No 'nodes' configured for '%s', skipping readiness check", name)
+            if ready_delay > 0.0:
+                self.log.info("'%s' ready_delay %.1fs before next launch", name, ready_delay)
+                time.sleep(ready_delay)
             return True
 
-        return self._wait_until_ready(name, nodes, timeout)
+        if not self._wait_until_ready(name, nodes, timeout):
+            return False
+
+        if ready_delay > 0.0:
+            self.log.info("'%s' ready_delay %.1fs before next launch", name, ready_delay)
+            time.sleep(ready_delay)
+        return True
 
     def _wait_until_ready(self, launch_name: str, nodes: List[str], timeout: float) -> bool:
         deadline = time.time() + timeout
