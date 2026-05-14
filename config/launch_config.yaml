@@ -18,6 +18,13 @@ launches:
     launch_cmd: "source ~/driver_ws/devel/setup.bash; roslaunch lsdc_slam mapping_livox.launch"
     start_timeout: 15.0
 
+  BagRecorder:
+    group: algo
+    depends_on: ["LIO"]
+    nodes: ["/drone_${DRONE_ID}_save_result"]
+    launch_cmd: "source ~/driver_ws/devel/setup.bash; roslaunch lsdc_slam save_result.launch drone_id:=${DRONE_ID}"
+    start_timeout: 5.0
+
   Planner:
     group: algo
     depends_on: ["LIO"]
